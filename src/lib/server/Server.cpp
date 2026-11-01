@@ -40,6 +40,9 @@ namespace {
 
 using MonitorList = std::vector<MonitorRect>;
 
+// distance from a monitor edge the cursor is placed at when it comes back
+constexpr int32_t kLandingMargin = 8;
+
 bool monitorContains(const MonitorRect &m, int32_t x, int32_t y)
 {
   return x >= m.m_x && x < m.m_x + m.m_w && y >= m.m_y && y < m.m_y + m.m_h;
@@ -869,6 +872,11 @@ void Server::avoidJumpZone(const BaseClientProxy *dst, Direction dir, int32_t &x
       dy = monitor->m_y;
       dw = monitor->m_w;
       dh = monitor->m_h;
+
+      // positions reported by the mouse hook overshoot a monitor edge by a
+      // few pixels, so land further in than a plain jump zone or the cursor
+      // would be sent straight back
+      z = std::max(z, kLandingMargin);
     }
   }
 

@@ -134,6 +134,10 @@ protected:
   void fakeLocalKey(KeyButton button, bool press) const;
 
 private:
+  // true if a motion event at x,y was generated before the cursor was
+  // parked at the center when leaving the computer
+  bool isStaleMotion(int32_t x, int32_t y) const;
+
   // initialization and shutdown operations
   HCURSOR createBlankCursor() const;
   void destroyCursor(HCURSOR cursor) const;
@@ -281,6 +285,12 @@ private:
   // last mouse position
   int32_t m_xCursor = 0;
   int32_t m_yCursor = 0;
+
+  // motion reported near these positions right after leaving the computer
+  // was generated before the cursor was parked at the center
+  bool m_dropStaleMotion = false;
+  int32_t m_staleX[2] = {0, 0};
+  int32_t m_staleY[2] = {0, 0};
 
   // last clipboard
   uint32_t m_sequenceNumber = 0;
