@@ -49,8 +49,8 @@
 #pragma warning(pop)
 #endif
 
-// how far from a remembered position motion still counts as coming from there
-static constexpr int32_t kStaleMotionRadius = 150;
+// how long a single motion can be and still be real motion right after leaving
+static constexpr int32_t kStaleMotionDistance = 150;
 
 // X button stuff
 #if !defined(WM_XBUTTONDOWN)
@@ -296,19 +296,11 @@ void MSWindowsComputer::leave()
   if (m_isPrimary) {
     // the hook may still hand us motion from before the cursor is parked at the
     // center below, with positions next to where the cursor was.  at the edges
-    // of the virtual desktop those look like half the computer size and are
-    // dropped as bogus, but an edge of a single monitor is much closer than
-    // that, so remember where the cursor was and drop them here.
-    POINT cursorPos = {m_xCursor, m_yCursor};
-    getThisCursorPos(&cursorPos);
-    const auto farFromCenter = [this](int32_t x, int32_t y) {
-      return std::abs(x - m_xCenter) > 2 * kStaleMotionRadius || std::abs(y - m_yCenter) > 2 * kStaleMotionRadius;
-    };
-    m_dropStaleMotion = farFromCenter(cursorPos.x, cursorPos.y) && farFromCenter(m_xCursor, m_yCursor);
-    m_staleX[0] = cursorPos.x;
-    m_staleY[0] = cursorPos.y;
-    m_staleX[1] = m_xCursor;
-    m_staleY[1] = m_yCursor;
+    // of the virtual desktop that is as long as half the computer and gets
+    // dropped as bogus in onMouseMove(), but the edge of a single monitor is
+    // much closer than that, so also drop any long motion until the first
+    // short one.
+    m_dropStaleMotion = true;
 
     LOG_VERBOSE("centering cursor on leave: %+d, %+d", m_xCenter, m_yCenter);
     warpCursor(m_xCenter, m_yCenter);
@@ -1265,15 +1257,6 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
     return true;
   }
 
-  // ignore motion from before the cursor was parked at the center
-  if (m_dropStaleMotion && !m_isOnComputer) {
-    if (isStaleMotion(mx, my)) {
-      LOG_DEBUG("dropped stale motion: %+d,%+d", mx, my);
-      return true;
-    }
-    m_dropStaleMotion = false;
-  }
-
   // save position to compute delta of next motion
   saveMousePosition(mx, my);
 
@@ -1298,23 +1281,18 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
         -y + bogusZoneSize > m_yCenter - m_y || y + bogusZoneSize > m_y + m_h - m_yCenter) {
 
       LOG_DEBUG("dropped bogus delta motion: %+d,%+d", x, y);
+    } else if (m_dropStaleMotion && (std::abs(x) > kStaleMotionDistance || std::abs(y) > kStaleMotionDistance)) {
+      // motion from before the cursor was parked at the center, see leave()
+      LOG_DEBUG("dropped stale delta motion: %+d,%+d", x, y);
     } else {
+      m_dropStaleMotion = false;
+
       // send motion
       sendEvent(EventTypes::PrimaryComputerMotionOnSecondary, MotionInfo::alloc(x, y));
     }
   }
 
   return true;
-}
-
-bool MSWindowsComputer::isStaleMotion(int32_t x, int32_t y) const
-{
-  for (int i = 0; i < 2; ++i) {
-    if (std::abs(x - m_staleX[i]) <= kStaleMotionRadius && std::abs(y - m_staleY[i]) <= kStaleMotionRadius) {
-      return true;
-    }
-  }
-  return false;
 }
 
 bool MSWindowsComputer::onMouseWheel(int32_t xDelta, int32_t yDelta)
