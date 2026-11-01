@@ -26,15 +26,124 @@
 #include "server/PrimaryClient.h"
 
 #ifdef _WIN32
-#include <algorithm>
 #include <array>
 #endif
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 
 using namespace deskflow::server;
+
+namespace {
+
+using MonitorList = std::vector<MonitorRect>;
+
+bool monitorContains(const MonitorRect &m, int32_t x, int32_t y)
+{
+  return x >= m.m_x && x < m.m_x + m.m_w && y >= m.m_y && y < m.m_y + m.m_h;
+}
+
+// true if there is no monitor covering the point
+bool isEmptySpace(const MonitorList &monitors, int32_t x, int32_t y)
+{
+  return std::ranges::none_of(monitors, [&](const MonitorRect &m) { return monitorContains(m, x, y); });
+}
+
+// the monitor holding the point, or the closest one if the point is in a gap
+// (low level mouse hooks report positions a few pixels past the edge of a
+// monitor when the system stops the cursor there)
+const MonitorRect *nearestMonitor(const MonitorList &monitors, int32_t x, int32_t y)
+{
+  const MonitorRect *best = nullptr;
+  int64_t bestDist = 0;
+  for (const auto &m : monitors) {
+    const int64_t dx = x - std::clamp(x, m.m_x, m.m_x + m.m_w - 1);
+    const int64_t dy = y - std::clamp(y, m.m_y, m.m_y + m.m_h - 1);
+    const int64_t dist = dx * dx + dy * dy;
+    if (best == nullptr || dist < bestDist) {
+      best = &m;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+// Move the point against the direction the cursor is travelling (\p dir is the
+// side of the previous computer that was left, so Left means travelling left)
+// until it is on the closest monitor edge, and return that monitor.  A point
+// already on a monitor is left alone.
+const MonitorRect *pullOntoMonitor(const MonitorList &monitors, Direction dir, int32_t &x, int32_t &y)
+{
+  for (const auto &m : monitors) {
+    if (monitorContains(m, x, y)) {
+      return &m;
+    }
+  }
+
+  const MonitorRect *found = nullptr;
+  for (const auto &m : monitors) {
+    const bool rowOverlaps = y >= m.m_y && y < m.m_y + m.m_h;
+    const bool colOverlaps = x >= m.m_x && x < m.m_x + m.m_w;
+    switch (dir) {
+      using enum Direction;
+    case Left:
+      if (rowOverlaps && m.m_x + m.m_w - 1 < x && (found == nullptr || m.m_x + m.m_w > found->m_x + found->m_w)) {
+        found = &m;
+      }
+      break;
+    case Right:
+      if (rowOverlaps && m.m_x > x && (found == nullptr || m.m_x < found->m_x)) {
+        found = &m;
+      }
+      break;
+    case Top:
+      if (colOverlaps && m.m_y + m.m_h - 1 < y && (found == nullptr || m.m_y + m.m_h > found->m_y + found->m_h)) {
+        found = &m;
+      }
+      break;
+    case Bottom:
+      if (colOverlaps && m.m_y > y && (found == nullptr || m.m_y < found->m_y)) {
+        found = &m;
+      }
+      break;
+    case NoDirection:
+      break;
+    }
+  }
+
+  if (found != nullptr) {
+    switch (dir) {
+      using enum Direction;
+    case Left:
+      x = found->m_x + found->m_w - 1;
+      break;
+    case Right:
+      x = found->m_x;
+      break;
+    case Top:
+      y = found->m_y + found->m_h - 1;
+      break;
+    case Bottom:
+      y = found->m_y;
+      break;
+    case NoDirection:
+      break;
+    }
+    return found;
+  }
+
+  // nothing in line with the point, so just take the closest monitor
+  found = nearestMonitor(monitors, x, y);
+  if (found != nullptr) {
+    x = std::clamp(x, found->m_x, found->m_x + found->m_w - 1);
+    y = std::clamp(y, found->m_y, found->m_y + found->m_h - 1);
+  }
+  return found;
+}
+
+} // namespace
 
 //
 // Server
@@ -750,6 +859,18 @@ void Server::avoidJumpZone(const BaseClientProxy *dst, Direction dir, int32_t &x
   dst->getShape(dx, dy, dw, dh);
   float t = mapToFraction(dst, dir, x, y);
   int32_t z = getJumpZoneSize(dst);
+
+  // the landing point can be in a gap of the virtual desktop where there is
+  // no monitor.  walk it onto the nearest monitor edge in the direction of
+  // travel and avoid the jump zone of that monitor instead.
+  if (const auto &monitors = m_primaryClient->getMonitorRects(); monitors.size() > 1) {
+    if (const MonitorRect *monitor = pullOntoMonitor(monitors, dir, x, y); monitor != nullptr) {
+      dx = monitor->m_x;
+      dy = monitor->m_y;
+      dw = monitor->m_w;
+      dh = monitor->m_h;
+    }
+  }
 
   // move in far enough to avoid the jump zone.  if entering a side
   // that doesn't have a neighbor (i.e. an asymmetrical side) then we
@@ -1660,6 +1781,8 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
   auto dirv = NoDirection;
   int32_t xh = x;
   int32_t yv = y;
+  int32_t yh = y;
+  int32_t xv = x;
   if (x < ax + zoneSize) {
     xh -= zoneSize;
     dirh = Left;
@@ -1674,6 +1797,44 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
     yv += zoneSize;
     dirv = Bottom;
   }
+
+  // the edges of the virtual desktop are not the only way out.  when the
+  // monitors do not fill it, an edge of a single monitor with nothing
+  // next to it counts too.  positions stay in the virtual desktop's
+  // coordinates, as if the cursor had crossed its edge there.
+  if (const auto &monitors = m_primaryClient->getMonitorRects();
+      monitors.size() > 1 && (dirh == NoDirection || dirv == NoDirection)) {
+    if (const MonitorRect *mon = nearestMonitor(monitors, x, y); mon != nullptr) {
+      const int32_t mx = mon->m_x;
+      const int32_t my = mon->m_y;
+      const int32_t mw = mon->m_w;
+      const int32_t mh = mon->m_h;
+      const int32_t xIn = std::clamp(x, mx, mx + mw - 1);
+      const int32_t yIn = std::clamp(y, my, my + mh - 1);
+      if (dirh == NoDirection) {
+        if (x < mx + zoneSize && isEmptySpace(monitors, mx - 1, yIn)) {
+          xh = ax - zoneSize;
+          yh = yIn;
+          dirh = Left;
+        } else if (x >= mx + mw - zoneSize && isEmptySpace(monitors, mx + mw, yIn)) {
+          xh = ax + aw - 1 + zoneSize;
+          yh = yIn;
+          dirh = Right;
+        }
+      }
+      if (dirv == NoDirection) {
+        if (y < my + zoneSize && isEmptySpace(monitors, xIn, my - 1)) {
+          yv = ay - zoneSize;
+          xv = xIn;
+          dirv = Top;
+        } else if (y >= my + mh - zoneSize && isEmptySpace(monitors, xIn, my + mh)) {
+          yv = ay + ah - 1 + zoneSize;
+          xv = xIn;
+          dirv = Bottom;
+        }
+      }
+    }
+  }
   if (dirh == NoDirection && dirv == NoDirection) {
     // still on local computer
     noSwitch(x, y);
@@ -1682,8 +1843,8 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
 
   // check both horizontally and vertically
   std::array<Direction, 2> dirs = {dirh, dirv};
-  std::array<int32_t, 2> xs = {xh, x};
-  std::array<int32_t, 2> ys = {y, yv};
+  std::array<int32_t, 2> xs = {xh, xv};
+  std::array<int32_t, 2> ys = {yh, yv};
   for (int i = 0; i < 2; ++i) {
     Direction dir = dirs.at(i);
     if (dir == NoDirection) {

@@ -10,7 +10,19 @@
 
 #include "deskflow/ClipboardTypes.h"
 
+#include <cstdint>
+#include <vector>
+
 class IClipboard;
+
+//! Rectangle of one physical monitor, in the same coordinates as getShape()
+struct MonitorRect
+{
+  int32_t m_x = 0;
+  int32_t m_y = 0;
+  int32_t m_w = 0;
+  int32_t m_h = 0;
+};
 
 //! Computer interface
 /*!
@@ -49,6 +61,18 @@ public:
   \c y and the size of the computer in \c width and \c height.
   */
   virtual void getShape(int32_t &x, int32_t &y, int32_t &width, int32_t &height) const = 0;
+
+  //! Get monitor rectangles
+  /*!
+  Return the rectangle of each physical monitor, in the coordinates used by
+  getShape().  The default is an empty list, meaning the computer is treated
+  as one solid rectangle.
+  */
+  virtual const std::vector<MonitorRect> &getMonitorRects() const
+  {
+    static const std::vector<MonitorRect> none;
+    return none;
+  }
 
   //! Get cursor position
   /*!

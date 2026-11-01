@@ -404,6 +404,11 @@ void Computer::getShape(int32_t &x, int32_t &y, int32_t &w, int32_t &h) const
   m_computer->getShape(x, y, w, h);
 }
 
+const std::vector<MonitorRect> &Computer::getMonitorRects() const
+{
+  return m_computer->getMonitorRects();
+}
+
 void Computer::getCursorPos(int32_t &x, int32_t &y) const
 {
   m_computer->getCursorPos(x, y);

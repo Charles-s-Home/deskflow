@@ -435,6 +435,11 @@ void MSWindowsComputer::getShape(int32_t &x, int32_t &y, int32_t &w, int32_t &h)
   h = m_h;
 }
 
+const std::vector<MonitorRect> &MSWindowsComputer::getMonitorRects() const
+{
+  return m_monitors;
+}
+
 void MSWindowsComputer::getCursorPos(int32_t &x, int32_t &y) const
 {
   m_desks->getCursorPos(x, y);
@@ -1440,6 +1445,19 @@ void MSWindowsComputer::updateComputerShape()
 
   // check for multiple monitors
   m_multimon = (m_w != GetSystemMetrics(SM_CXSCREEN) || m_h != GetSystemMetrics(SM_CYSCREEN));
+
+  // remember where each monitor is so the server can tell which edges of
+  // the virtual desktop are really next to nothing
+  m_monitors.clear();
+  EnumDisplayMonitors(
+      nullptr, nullptr,
+      [](HMONITOR, HDC, LPRECT rect, LPARAM data) -> BOOL {
+        auto *monitors = reinterpret_cast<std::vector<MonitorRect> *>(data);
+        monitors->push_back({rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top});
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&m_monitors)
+  );
 
   // tell the desks
   m_desks->setShape(m_x, m_y, m_w, m_h, m_xCenter, m_yCenter, m_multimon);
