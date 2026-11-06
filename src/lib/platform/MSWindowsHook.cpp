@@ -10,6 +10,7 @@
 #include "base/Log.h"
 #include "deskflow/DisplayException.h"
 
+#include <atomic>
 #include <cstring>
 #include <mutex>
 
@@ -44,6 +45,7 @@ static std::mutex g_keyStateMutex;
 static DWORD g_hookThread = 0;
 static bool g_fakeServerInput = false;
 static BOOL g_isPrimary = TRUE;
+static std::atomic<uint32_t> g_mouseHookCalls{0};
 
 MSWindowsHook::~MSWindowsHook()
 {
@@ -156,6 +158,11 @@ bool MSWindowsHook::getPhysicalKeyState(BYTE keys[MSWindowsHook::kVirtualKeyCoun
     std::memcpy(keys, g_keyState, sizeof(g_keyState));
   }
   return g_keyStateValid;
+}
+
+uint32_t MSWindowsHook::getMouseHookCallCount()
+{
+  return g_mouseHookCalls.load(std::memory_order_relaxed);
 }
 
 static void keyboardGetState(BYTE keys[MSWindowsHook::kVirtualKeyCount], DWORD vkCode, bool kf_up)
@@ -626,6 +633,9 @@ static bool mouseHookHandler(WPARAM wParam, int32_t x, int32_t y, int32_t data)
 static LRESULT CALLBACK mouseLLHook(int code, WPARAM wParam, LPARAM lParam)
 {
   if (code >= 0) {
+    // let the watchdog see that Windows still calls us
+    g_mouseHookCalls.fetch_add(1, std::memory_order_relaxed);
+
     // decode the message
     MSLLHOOKSTRUCT *info = reinterpret_cast<MSLLHOOKSTRUCT *>(lParam);
 

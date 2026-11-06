@@ -12,6 +12,7 @@
 #include "platform/MSWindowsHook.h"
 #include "platform/MSWindowsPowerManager.h"
 
+#include <chrono>
 #include <map>
 #include <string>
 #include <vector>
@@ -189,6 +190,22 @@ private: // HACK
   // update computer size cache
   void updateComputerShape();
 
+  // read the shape and monitors again and, if either changed, tell the hook, the cursor and the server.
+  // returns true if something changed.
+  bool refreshComputerShape();
+
+  // recheck the shape shortly after a display change, in case the first read caught the displays half way
+  // through changing.  a new display change cancels the rechecks that did not run yet.
+  void scheduleDisplayRechecks();
+  void cancelDisplayRechecks();
+  void handleDisplayRecheck(size_t index);
+
+  // hook watchdog: reinstall the mouse hook if the cursor moves but Windows does not call the hook
+  void startHookWatchdog();
+  void stopHookWatchdog();
+  void handleHookWatchdog();
+  void reinstallHooks();
+
   // fix timer callback
   void handleFixes();
 
@@ -298,6 +315,25 @@ private:
 
   // timer for periodically checking stuff that requires polling
   EventQueueTimer *m_fixTimer = nullptr;
+
+  // one-shot timers that read the shape again after a display change
+  static constexpr size_t kDisplayRecheckCount = 2;
+  EventQueueTimer *m_displayRecheckTimers[kDisplayRecheckCount] = {nullptr, nullptr};
+
+  // hook watchdog state
+  EventQueueTimer *m_hookWatchTimer = nullptr;
+  bool m_hookWatchHasBaseline = false;
+  int32_t m_hookWatchX = 0;
+  int32_t m_hookWatchY = 0;
+  uint32_t m_hookWatchCalls = 0;
+  // consecutive checks where the cursor moved but the hook was not called
+  int m_hookSuspectChecks = 0;
+  // reinstalls since the hook last reported cursor movement
+  int m_hookReinstalls = 0;
+  bool m_hookGaveUpLogged = false;
+  std::chrono::steady_clock::time_point m_lastHookReinstall;
+  // set when we moved the cursor ourselves, so the next watchdog check does not take that for user movement
+  bool m_cursorMovedByUs = false;
 
   // the keyboard layout to use when off primary computer
   HKL m_keyLayout = nullptr;

@@ -67,6 +67,13 @@ public:
   //! Copy the hook's physical key state; false until it has observed an event.
   static bool getPhysicalKeyState(BYTE keys[kVirtualKeyCount]);
 
+  //! How many times Windows has called the low-level mouse hook so far.
+  /*!
+  Only ever grows (wraps around), so a count that stays the same while the
+  cursor moves means Windows stopped calling the hook.
+  */
+  static uint32_t getMouseHookCallCount();
+
   static EHookResult install();
 
   static int uninstall();

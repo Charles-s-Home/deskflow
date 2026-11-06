@@ -30,7 +30,9 @@
 
 #include <Shlobj.h>
 #include <algorithm>
+#include <chrono>
 #include <comutil.h>
+#include <format>
 #include <string.h>
 
 // suppress warning about GetVersionEx, which is used indirectly in this
@@ -51,6 +53,27 @@
 
 // how long a single motion can be and still be real motion right after leaving
 static constexpr int32_t kStaleMotionDistance = 150;
+
+// hook watchdog: how often to look at the cursor and the hook
+static constexpr double kHookWatchInterval = 0.5;
+// hook watchdog: checks in a row with cursor motion the hook did not report before reinstalling the hook
+static constexpr int kHookSuspectChecksToReinstall = 2;
+// hook watchdog: seconds between two reinstalls
+static constexpr std::chrono::seconds kHookReinstallInterval{5};
+// hook watchdog: reinstalls in a row that did not help before settling for the slow interval
+static constexpr int kHookReinstallsBeforeGivingUp = 3;
+// hook watchdog: seconds between two reinstalls after giving up
+static constexpr std::chrono::seconds kHookSlowReinstallInterval{30};
+
+// seconds after a display change to read the displays again
+static constexpr double kDisplayRecheckDelays[] = {0.5, 2.0};
+
+static bool sameMonitors(const std::vector<MonitorRect> &a, const std::vector<MonitorRect> &b)
+{
+  return std::ranges::equal(a, b, [](const MonitorRect &l, const MonitorRect &r) {
+    return l.m_x == r.m_x && l.m_y == r.m_y && l.m_w == r.m_w && l.m_h == r.m_h;
+  });
+}
 
 // X button stuff
 #if !defined(WM_XBUTTONDOWN)
@@ -145,6 +168,7 @@ MSWindowsComputer::~MSWindowsComputer()
 {
   assert(s_computer != nullptr);
 
+  cancelDisplayRechecks();
   if (m_isEnabled) {
     disable();
   }
@@ -200,6 +224,9 @@ void MSWindowsComputer::enable()
 
     // watch jump zones
     m_hook.setMode(kHOOK_WATCH_JUMP_ZONE);
+
+    // make sure Windows keeps calling the hook
+    startHookWatchdog();
   }
 }
 
@@ -207,6 +234,9 @@ void MSWindowsComputer::disable()
 {
   LOG_DEBUG("disabling %s computer", m_isPrimary ? "primary" : "secondary");
   m_isEnabled = false;
+
+  stopHookWatchdog();
+  cancelDisplayRechecks();
 
   // stop tracking the active desk
   m_desks->disable();
@@ -240,6 +270,7 @@ void MSWindowsComputer::disable()
 void MSWindowsComputer::enter()
 {
   m_dropStaleMotion = false;
+  m_cursorMovedByUs = true;
   m_desks->enter();
   if (m_isPrimary) {
     // enable special key sequences on win95 family
@@ -1337,33 +1368,209 @@ bool MSWindowsComputer::onScreensaver(bool activated)
 
 bool MSWindowsComputer::onDisplayChange()
 {
-  // computer resolution may have changed.  save old shape.
-  int32_t xOld = m_x, yOld = m_y, wOld = m_w, hOld = m_h;
+  refreshComputerShape();
+
+  // the displays can still be changing when this arrives, so look again a moment later
+  scheduleDisplayRechecks();
+
+  return true;
+}
+
+bool MSWindowsComputer::refreshComputerShape()
+{
+  // computer resolution or monitors may have changed.  save old shape.
+  const int32_t xOld = m_x, yOld = m_y, wOld = m_w, hOld = m_h;
+  const std::vector<MonitorRect> monitorsOld = m_monitors;
 
   // update shape
   updateComputerShape();
 
-  // do nothing if resolution hasn't changed
-  if (xOld != m_x || yOld != m_y || wOld != m_w || hOld != m_h) {
-    if (m_isPrimary) {
-      if (!m_isOnComputer) {
-        LOG_VERBOSE("centering cursor on display change: %+d, %+d", m_xCenter, m_yCenter);
-        warpCursor(m_xCenter, m_yCenter);
-      }
-
-      // tell hook about resize if on computer
-      else {
-        m_hook.setZone(m_x, m_y, m_w, m_h, getJumpZoneSize());
-      }
-    }
-
-    // send new computer info
-    sendEvent(EventTypes::ComputerShapeChanged);
-
-    LOG_DEBUG("computer shape: %d,%d %dx%d %s", m_x, m_y, m_w, m_h, m_multimon ? "(multi-monitor)" : "");
+  // do nothing if neither the shape nor the monitors changed
+  const bool shapeChanged = (xOld != m_x || yOld != m_y || wOld != m_w || hOld != m_h);
+  const bool monitorsChanged = !sameMonitors(monitorsOld, m_monitors);
+  if (!shapeChanged && !monitorsChanged) {
+    return false;
   }
 
+  if (m_isPrimary) {
+    m_cursorMovedByUs = true;
+    if (!m_isOnComputer) {
+      LOG_VERBOSE("centering cursor on display change: %+d, %+d", m_xCenter, m_yCenter);
+      warpCursor(m_xCenter, m_yCenter);
+    }
+
+    // tell hook about resize if on computer
+    else {
+      m_hook.setZone(m_x, m_y, m_w, m_h, getJumpZoneSize());
+    }
+  }
+
+  // send new computer info
+  sendEvent(EventTypes::ComputerShapeChanged);
+
+  std::string monitors;
+  for (size_t i = 0; i < m_monitors.size(); ++i) {
+    const auto &monitor = m_monitors[i];
+    monitors += std::format(" [{}] {},{} {}x{}", i, monitor.m_x, monitor.m_y, monitor.m_w, monitor.m_h);
+  }
+  LOG_INFO(
+      "computer shape: %d,%d %dx%d %s, %d monitors:%s", m_x, m_y, m_w, m_h, m_multimon ? "(multi-monitor)" : "",
+      static_cast<int>(m_monitors.size()), monitors.c_str()
+  );
+
   return true;
+}
+
+void MSWindowsComputer::scheduleDisplayRechecks()
+{
+  cancelDisplayRechecks();
+
+  for (size_t i = 0; i < kDisplayRecheckCount; ++i) {
+    auto *timer = m_events->newOneShotTimer(kDisplayRecheckDelays[i], nullptr);
+    m_displayRecheckTimers[i] = timer;
+    m_events->addHandler(EventTypes::Timer, timer, [this, i](const auto &) { handleDisplayRecheck(i); });
+  }
+}
+
+void MSWindowsComputer::cancelDisplayRechecks()
+{
+  for (auto &timer : m_displayRecheckTimers) {
+    if (timer != nullptr) {
+      m_events->removeHandler(EventTypes::Timer, timer);
+      m_events->deleteTimer(timer);
+      timer = nullptr;
+    }
+  }
+}
+
+void MSWindowsComputer::handleDisplayRecheck(size_t index)
+{
+  // a one-shot timer is done once it fired
+  if (auto *&timer = m_displayRecheckTimers[index]; timer != nullptr) {
+    m_events->removeHandler(EventTypes::Timer, timer);
+    m_events->deleteTimer(timer);
+    timer = nullptr;
+  }
+
+  if (refreshComputerShape()) {
+    LOG_INFO(
+        "display recheck %d of %d found a change", static_cast<int>(index + 1), static_cast<int>(kDisplayRecheckCount)
+    );
+  }
+
+  // after the last recheck the displays have settled.  Windows may have dropped the hooks while they
+  // changed without telling us, so put them back.
+  if (index + 1 == kDisplayRecheckCount && m_isPrimary && m_isEnabled) {
+    LOG_INFO("reinstalling the hooks after the display change");
+    reinstallHooks();
+  }
+}
+
+void MSWindowsComputer::reinstallHooks()
+{
+  m_lastHookReinstall = std::chrono::steady_clock::now();
+  m_desks->reinstallHooks();
+}
+
+void MSWindowsComputer::startHookWatchdog()
+{
+  if (!m_useHooks || m_hookWatchTimer != nullptr) {
+    return;
+  }
+
+  m_hookWatchHasBaseline = false;
+  m_hookSuspectChecks = 0;
+  m_hookReinstalls = 0;
+  m_hookGaveUpLogged = false;
+  m_cursorMovedByUs = false;
+  m_lastHookReinstall = {};
+
+  m_hookWatchTimer = m_events->newTimer(kHookWatchInterval, nullptr);
+  m_events->addHandler(EventTypes::Timer, m_hookWatchTimer, [this](const auto &) { handleHookWatchdog(); });
+}
+
+void MSWindowsComputer::stopHookWatchdog()
+{
+  if (m_hookWatchTimer != nullptr) {
+    m_events->removeHandler(EventTypes::Timer, m_hookWatchTimer);
+    m_events->deleteTimer(m_hookWatchTimer);
+    m_hookWatchTimer = nullptr;
+  }
+}
+
+// Windows removes a low-level hook without a word if the hook is too slow to answer, and nothing tells us.
+// The sign is the cursor moving while the hook is not called.  This works the same when the cursor is on
+// a client, where the server parks the cursor in the center: a working hook sees every move and the cursor
+// is put back, a dead one lets the cursor move around on this computer.
+void MSWindowsComputer::handleHookWatchdog()
+{
+  using Clock = std::chrono::steady_clock;
+
+  // the hook is only meant to see the input of the desk it is on
+  if (!m_isPrimary || !m_isEnabled || !m_desks->isHookDeskReady()) {
+    m_hookWatchHasBaseline = false;
+    m_hookSuspectChecks = 0;
+    return;
+  }
+
+  int32_t x = 0;
+  int32_t y = 0;
+  m_desks->getCursorPos(x, y);
+  // read after the cursor: a move whose hook call we miss is then at worst seen again by the next check
+  const uint32_t calls = MSWindowsHook::getMouseHookCallCount();
+
+  const bool movedByUs = m_cursorMovedByUs;
+  const bool hadBaseline = m_hookWatchHasBaseline;
+  const bool cursorMoved = (x != m_hookWatchX || y != m_hookWatchY);
+  const bool hookCalled = (calls != m_hookWatchCalls);
+
+  m_cursorMovedByUs = false;
+  m_hookWatchHasBaseline = true;
+  m_hookWatchX = x;
+  m_hookWatchY = y;
+  m_hookWatchCalls = calls;
+
+  // nothing to compare with, or the cursor moved because of us
+  if (!hadBaseline || movedByUs || !cursorMoved) {
+    m_hookSuspectChecks = 0;
+    return;
+  }
+
+  if (hookCalled) {
+    m_hookSuspectChecks = 0;
+    if (m_hookReinstalls > 0) {
+      LOG_INFO("the mouse hook reports cursor movement again after %d reinstalls", m_hookReinstalls);
+      m_hookReinstalls = 0;
+      m_hookGaveUpLogged = false;
+    }
+    return;
+  }
+
+  if (++m_hookSuspectChecks < kHookSuspectChecksToReinstall) {
+    return;
+  }
+
+  const bool gaveUp = (m_hookReinstalls >= kHookReinstallsBeforeGivingUp);
+  const auto interval = gaveUp ? kHookSlowReinstallInterval : kHookReinstallInterval;
+  if (m_lastHookReinstall != Clock::time_point{} && Clock::now() - m_lastHookReinstall < interval) {
+    return;
+  }
+
+  LOG_WARN(
+      "the mouse hook has not reported the cursor moving to %d,%d for %d checks, reinstalling it (reinstall %d)", x, y,
+      m_hookSuspectChecks, m_hookReinstalls + 1
+  );
+  m_hookSuspectChecks = 0;
+  reinstallHooks();
+  ++m_hookReinstalls;
+
+  if (m_hookReinstalls >= kHookReinstallsBeforeGivingUp && !m_hookGaveUpLogged) {
+    m_hookGaveUpLogged = true;
+    LOG_ERR(
+        "the mouse hook is still not reporting cursor movement after %d reinstalls, trying again every %d seconds",
+        m_hookReinstalls, static_cast<int>(kHookSlowReinstallInterval.count())
+    );
+  }
 }
 
 void MSWindowsComputer::onClipboardChange()
@@ -1385,6 +1592,9 @@ void MSWindowsComputer::onClipboardChange()
 
 void MSWindowsComputer::warpCursorNoFlush(int32_t x, int32_t y)
 {
+  // the hook watchdog must not take this for the user moving the cursor
+  m_cursorMovedByUs = true;
+
   // send an event that we can recognize before the mouse warp
   PostThreadMessage(GetCurrentThreadId(), DESKFLOW_MSG_PRE_WARP, x, y);
 

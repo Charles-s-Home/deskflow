@@ -121,6 +121,14 @@ public:
   */
   void installScreensaverHooks(bool install);
 
+  //! Install the hooks again
+  /*!
+  Has the active desk's thread uninstall and install the hooks again, which
+  brings them back if Windows silently removed them.  Does nothing if
+  \c isHookDeskReady() is false.  Must be called from the main thread.
+  */
+  void reinstallHooks();
+
   //! Start ignoring user input
   /*!
   Starts ignoring user input so we don't pick up our own synthesized events.
@@ -136,6 +144,13 @@ public:
   //@}
   //! @name accessors
   //@{
+
+  //! Check that the hooks are on a desk we can talk to
+  /*!
+  Returns true if hooks are used and the active desk is accessible and not
+  the screen saver's.
+  */
+  bool isHookDeskReady() const;
 
   //! Get cursor position
   /*!

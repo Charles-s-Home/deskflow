@@ -217,6 +217,22 @@ void MSWindowsDesks::setShape(
   m_multimon = isMultimon;
 }
 
+void MSWindowsDesks::reinstallHooks()
+{
+  // the desk thread uninstalls and installs the hooks again.  that does not
+  // touch the hook mode and zone, they live outside of the hooks.
+  if (isHookDeskReady()) {
+    sendMessage(DESKFLOW_MSG_SWITCH, 0, 0);
+  }
+}
+
+bool MSWindowsDesks::isHookDeskReady() const
+{
+  // the screen saver desktop is not the one the hooks are on
+  return m_useHooks && m_activeDesk != nullptr && m_activeDesk->m_window != nullptr && isDeskAccessible(m_activeDesk) &&
+         !m_screensaver->isActive();
+}
+
 void MSWindowsDesks::installScreensaverHooks(bool install)
 {
   if (m_isPrimary && m_screensaverNotify != install) {
@@ -693,6 +709,7 @@ void MSWindowsDesks::deskThread(const void *vdesk)
         switch (MSWindowsHook::install()) {
         case kHOOK_FAILED:
           // we won't work on this desk
+          LOG_WARN("failed to install the hooks on desk \"%ls\"", desk->m_name.c_str());
           desk->m_lowLevel = false;
           break;
 
