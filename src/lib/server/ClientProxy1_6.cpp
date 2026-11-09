@@ -101,6 +101,7 @@ void ClientProxy1_6::resetOptions()
 
 void ClientProxy1_6::setOptions(const OptionsList &options)
 {
+  LOG_DEBUG("offering compressed clipboard data to \"%s\"", getName().c_str());
   OptionsList withCompress = options;
   withCompress.push_back(kOptionClipboardCompress);
   withCompress.push_back(1);

@@ -806,6 +806,7 @@ void ServerProxy::setOptions()
       setKeepAliveRate(1.0e-3 * static_cast<double>(options[i + 1]));
     } else if (options[i] == kOptionClipboardCompress && options[i + 1] != 0) {
       // the server can read compressed clipboard data and wants us to say we can too
+      LOG_DEBUG("server offers compressed clipboard data, accepting");
       m_compressClipboard = true;
       ProtocolUtil::writef(m_stream, kMsgCClipboardZip);
     }
