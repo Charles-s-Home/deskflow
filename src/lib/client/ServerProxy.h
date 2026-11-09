@@ -132,6 +132,8 @@ private:
 
   MessageParser m_parser = &ServerProxy::parseHandshakeMessage;
   IEventQueue *m_events = nullptr;
+  // the server told us it reads compressed clipboard data
+  bool m_compressClipboard = false;
   std::string m_clipboardDataCached;
   ClipboardChunkAssemblyState m_clipboardChunkState;
 };

@@ -606,9 +606,18 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
 
     if (m_enableClipboard) {
       // send the clipboard data to new active computer
+      std::string firstData;
       for (ClipboardID id = 0; id < kClipboardEnd; ++id) {
+        std::string data = m_clipboards[id].m_clipboard.marshall();
         // Hackity hackity hack
-        if (m_clipboards[id].m_clipboard.marshall().size() > (m_maximumClipboardSize * 1024)) {
+        if (data.size() > (m_maximumClipboardSize * 1024)) {
+          continue;
+        }
+        // no need to send the same data twice, e.g. macOS has just one clipboard
+        if (id == 0) {
+          firstData = std::move(data);
+        } else if (data == firstData) {
+          LOG_DEBUG("not sending clipboard %d to \"%s\", same as clipboard 0", id, getName(m_active).c_str());
           continue;
         }
         m_active->setClipboard(id, &m_clipboards[id].m_clipboard);

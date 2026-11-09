@@ -23,8 +23,15 @@ public:
 
   void setClipboard(ClipboardID id, const IClipboard *clipboard) override;
   bool recvClipboard() override;
+  void resetOptions() override;
+  void setOptions(const OptionsList &options) override;
+
+protected:
+  bool parseMessage(const uint8_t *code) override;
 
 private:
+  //! The client confirmed it understands compressed clipboard data
+  bool m_compressClipboard = false;
   IEventQueue *m_events;
   std::string m_clipboardDataCached;
   ClipboardChunkAssemblyState m_clipboardChunkState;

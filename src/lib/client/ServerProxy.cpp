@@ -13,6 +13,7 @@
 #include "client/Client.h"
 #include "deskflow/Clipboard.h"
 #include "deskflow/ClipboardChunk.h"
+#include "deskflow/ClipboardCompress.h"
 #include "deskflow/DeskflowException.h"
 #include "deskflow/OptionTypes.h"
 #include "deskflow/ProtocolTypes.h"
@@ -80,6 +81,7 @@ void ServerProxy::handleData()
 {
   // handle messages until there are no more.  first read message code.
   uint8_t code[4];
+  bool gotMessage = false;
   uint32_t n = m_stream->read(code, 4);
   while (n != 0) {
     // verify we got an entire code
@@ -115,8 +117,16 @@ void ServerProxy::handleData()
       return;
     }
 
+    // anything from the server shows it is alive, a long clipboard transfer
+    // can hold the keep alive messages back for longer than the alarm
+    gotMessage = true;
+
     // next message
     n = m_stream->read(code, 4);
+  }
+
+  if (gotMessage) {
+    resetKeepAliveAlarm();
   }
 
   flushCompressedMouse();
@@ -367,7 +377,7 @@ void ServerProxy::onClipboardChanged(ClipboardID id, const IClipboard *clipboard
   std::string data = IClipboard::marshall(clipboard);
   LOG_DEBUG("sending clipboard %d seqnum=%d", id, m_seqNum);
 
-  StreamChunker::sendClipboard(data, data.size(), id, m_seqNum, m_events, this);
+  StreamChunker::sendClipboard(data, data.size(), id, m_seqNum, m_events, this, m_compressClipboard);
 }
 
 void ServerProxy::flushCompressedMouse()
@@ -543,6 +553,12 @@ void ServerProxy::setClipboard()
     LOG_DEBUG("receiving clipboard %d size=%zu", id, size);
   } else if (r == TransferState::Finished) {
     LOG_DEBUG("received clipboard %d size=%zu", id, m_clipboardDataCached.size());
+
+    // the limit applies to the uncompressed size
+    if (!ClipboardCompress::decompress(m_clipboardDataCached, m_client->getMaximumClipboardReceiveSizeBytes())) {
+      m_clipboardDataCached.shrink_to_fit();
+      return;
+    }
 
     // forward
     Clipboard clipboard;
@@ -744,6 +760,7 @@ void ServerProxy::resetOptions()
 
   // forward
   m_client->resetOptions();
+  m_compressClipboard = false;
 
   // reset keep alive
   setKeepAliveRate(kKeepAliveRate);
@@ -787,6 +804,10 @@ void ServerProxy::setOptions()
     } else if (options[i] == kOptionHeartbeat) {
       // update keep alive
       setKeepAliveRate(1.0e-3 * static_cast<double>(options[i + 1]));
+    } else if (options[i] == kOptionClipboardCompress && options[i + 1] != 0) {
+      // the server can read compressed clipboard data and wants us to say we can too
+      m_compressClipboard = true;
+      ProtocolUtil::writef(m_stream, kMsgCClipboardZip);
     }
 
     if (id != kKeyModifierIDNull) {

@@ -57,6 +57,8 @@ static const OptionID kOptionDefaultLockToComputerState = OPTION_CODE("LTSS");
 static const OptionID kOptionDisableLockToComputer = OPTION_CODE("DLTS");
 static const OptionID kOptionClipboardSharing = OPTION_CODE("CLPS");
 static const OptionID kOptionClipboardSharingSize = OPTION_CODE("CLSZ");
+//! Sender may compress clipboard data once the receiver confirmed with kMsgCClipboardZip
+static const OptionID kOptionClipboardCompress = OPTION_CODE("CLZP");
 //@}
 
 //! @name Computer switch corner masks

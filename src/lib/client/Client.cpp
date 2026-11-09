@@ -239,9 +239,11 @@ bool Client::leave()
 
   if (m_enableClipboard) {
     // send clipboards that we own and that have changed
+    // the first one sent goes out once; the others are skipped if they hold the same data
+    ClipboardID sentId = kClipboardEnd;
     for (ClipboardID id = 0; id < kClipboardEnd; ++id) {
-      if (m_ownClipboard[id]) {
-        sendClipboard(id);
+      if (m_ownClipboard[id] && sendClipboard(id, sentId)) {
+        sentId = id;
       }
     }
   }
@@ -373,7 +375,7 @@ std::string Client::getName() const
   return m_name;
 }
 
-void Client::sendClipboard(ClipboardID id)
+bool Client::sendClipboard(ClipboardID id, ClipboardID sameAs)
 {
   // note -- m_mutex must be locked on entry
   assert(m_computer != nullptr);
@@ -395,7 +397,7 @@ void Client::sendClipboard(ClipboardID id)
     std::string data = clipboard.marshall();
     if (data.size() >= m_maximumClipboardSize * 1024) {
       LOG_WARN("not sending clipboard data, exceeds limit: %zu KB", m_maximumClipboardSize);
-      return;
+      return false;
     }
 
     // save new time
@@ -404,9 +406,16 @@ void Client::sendClipboard(ClipboardID id)
     if (!m_sentClipboard[id] || data != m_dataClipboard[id]) {
       m_sentClipboard[id] = true;
       m_dataClipboard[id] = data;
+      // the server already got this data as another clipboard
+      if (sameAs < kClipboardEnd && data == m_dataClipboard[sameAs]) {
+        LOG_DEBUG("not sending clipboard %d, same as clipboard %d", id, sameAs);
+        return false;
+      }
       m_server->onClipboardChanged(id, &clipboard);
+      return true;
     }
   }
+  return false;
 }
 
 void Client::sendEvent(EventTypes type)

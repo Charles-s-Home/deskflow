@@ -192,7 +192,8 @@ public:
 
 private:
   void saveRelativeRestorePosition();
-  void sendClipboard(ClipboardID);
+  //! Send clipboard \p id if it changed; true if sent. Not sent if its data equals the last sent clipboard \p sameAs
+  bool sendClipboard(ClipboardID id, ClipboardID sameAs = kClipboardEnd);
   void sendEvent(deskflow::EventTypes);
   void sendConnectionFailedEvent(const char *msg);
   void setupConnecting();

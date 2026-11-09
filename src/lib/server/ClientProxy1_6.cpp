@@ -8,6 +8,9 @@
 
 #include "base/Log.h"
 #include "deskflow/ClipboardChunk.h"
+#include "deskflow/ClipboardCompress.h"
+#include "deskflow/OptionTypes.h"
+#include "deskflow/ProtocolTypes.h"
 #include "deskflow/ProtocolUtil.h"
 #include "deskflow/StreamChunker.h"
 #include "io/IStream.h"
@@ -44,7 +47,7 @@ void ClientProxy1_6::setClipboard(ClipboardID id, const IClipboard *clipboard)
     size_t size = data.size();
     LOG_DEBUG("sending clipboard %d to \"%s\"", id, getName().c_str());
 
-    StreamChunker::sendClipboard(data, size, id, 0, m_events, this);
+    StreamChunker::sendClipboard(data, size, id, 0, m_events, this, m_compressClipboard);
   }
 }
 
@@ -66,6 +69,11 @@ bool ClientProxy1_6::recvClipboard()
         (CLOG_DEBUG "received client \"%s\" clipboard %d seqnum=%d, size=%zu", getName().c_str(), id, seq,
          m_clipboardDataCached.size())
     );
+    // the limit applies to the uncompressed size
+    if (!ClipboardCompress::decompress(m_clipboardDataCached, m_server->getMaximumClipboardSizeBytes())) {
+      m_clipboardDataCached.shrink_to_fit();
+      return true;
+    }
     // save clipboard
     m_clipboard[id].m_clipboard.unmarshall(m_clipboardDataCached, 0);
     m_clipboard[id].m_sequenceNumber = seq;
@@ -82,4 +90,29 @@ bool ClientProxy1_6::recvClipboard()
   }
 
   return true;
+}
+
+void ClientProxy1_6::resetOptions()
+{
+  // the client has to confirm again after it got the new options
+  m_compressClipboard = false;
+  ClientProxy1_5::resetOptions();
+}
+
+void ClientProxy1_6::setOptions(const OptionsList &options)
+{
+  OptionsList withCompress = options;
+  withCompress.push_back(kOptionClipboardCompress);
+  withCompress.push_back(1);
+  ClientProxy1_5::setOptions(withCompress);
+}
+
+bool ClientProxy1_6::parseMessage(const uint8_t *code)
+{
+  if (memcmp(code, kMsgCClipboardZip, 4) == 0) {
+    LOG_DEBUG("client \"%s\" accepts compressed clipboard data", getName().c_str());
+    m_compressClipboard = true;
+    return true;
+  }
+  return ClientProxy1_5::parseMessage(code);
 }

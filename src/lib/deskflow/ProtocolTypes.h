@@ -490,6 +490,24 @@ extern const char *const kMsgCInfoAck;
  */
 extern const char *const kMsgCKeepAlive;
 
+/**
+ * @brief Clipboard compression accepted
+ *
+ * **Message Code**: `"CZIP"`
+ * **Direction**: Secondary → Primary
+ * **Format**: No parameters
+ *
+ * Sent by the client after it received the kOptionClipboardCompress option.
+ * Only after this message the server may send compressed clipboard data
+ * (see ClipboardCompress) to that client. A server that does not send the
+ * option never receives it, and a client that does not know the option
+ * never sends it. The client compresses its own data once it has seen the
+ * option.
+ *
+ * @since Protocol version 1.6 (extension of this fork)
+ */
+extern const char *const kMsgCClipboardZip;
+
 /** @} */ // end of protocol_commands group
 
 /**
