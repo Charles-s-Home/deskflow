@@ -34,6 +34,37 @@ bool normaliseMalformedMacDib(const std::string &data, std::string &normalisedDa
   }
   const auto expectedSize = sizeof(BITMAPINFOHEADER) + width * height * 4;
 
+  // A V4/V5 DIB with the usual BGRA masks and a top-down layout (what a macOS
+  // screenshot becomes) is valid, but CF_DIB readers such as GDI+ reject it
+  // (GetImage() returns null). Publish a canonical bottom-up BI_RGB DIB.
+  if (header->biSize >= 108 && data.size() >= 56 && header->biPlanes == 1 && header->biBitCount == 32 &&
+      header->biCompression == BI_BITFIELDS && header->biSize + width * height * 4 == data.size()) {
+    const auto *raw = reinterpret_cast<const uint8_t *>(data.data());
+    const auto redMask = qFromLittleEndian<quint32>(raw + 40);
+    const auto greenMask = qFromLittleEndian<quint32>(raw + 44);
+    const auto blueMask = qFromLittleEndian<quint32>(raw + 48);
+    if (redMask == 0x00ff0000 && greenMask == 0x0000ff00 && blueMask == 0x000000ff) {
+      const size_t rowSize = width * 4;
+      const bool topDown = header->biHeight < 0;
+      normalisedData.assign(sizeof(BITMAPINFOHEADER), '\0');
+      auto *out = reinterpret_cast<quint8 *>(&normalisedData[0]);
+      qToLittleEndian<quint32>(sizeof(BITMAPINFOHEADER), out);
+      qToLittleEndian<qint32>(header->biWidth, out + 4);
+      qToLittleEndian<qint32>(static_cast<qint32>(height), out + 8);
+      qToLittleEndian<quint16>(1, out + 12);
+      qToLittleEndian<quint16>(32, out + 14);
+      qToLittleEndian<quint32>(BI_RGB, out + 16);
+      normalisedData.reserve(sizeof(BITMAPINFOHEADER) + width * height * 4);
+      const char *pixels = data.data() + header->biSize;
+      for (size_t row = 0; row < height; ++row) {
+        const size_t srcRow = topDown ? height - 1 - row : row;
+        normalisedData.append(pixels + srcRow * rowSize, rowSize);
+      }
+      LOG_INFO("normalised %dx%d macOS clipboard image to bottom-up BI_RGB", header->biWidth, static_cast<int>(height));
+      return true;
+    }
+  }
+
   // macOS can describe an INFOHEADER-sized 32-bit pixel payload as a V5 DIB.
   // Windows then interprets the first pixels as V5 colour masks. The pixel
   // bytes are ordinary BGRA, so publish a canonical BI_RGB DIB instead.
