@@ -656,6 +656,13 @@ void OSXComputer::showCursor()
     LOG_ERR("failed to show cursor, error=%d", error);
   }
 
+  // hiding is counted: undo the extra hides from keepMouseCaptured(), and retry a few
+  // times in case the count is still above zero (showing at zero does nothing)
+  for (int i = 0; i < m_rehideCount + 8 && !CGCursorIsVisible(); ++i) {
+    CGDisplayShowCursor(m_displayID);
+  }
+  m_rehideCount = 0;
+
   // appears to fix "mouse randomly not showing" bug
   CGAssociateMouseAndMouseCursorPosition(true);
 
@@ -685,6 +692,44 @@ void OSXComputer::hideCursor()
   logCursorVisibility();
 
   m_cursorHidden = true;
+}
+
+void OSXComputer::keepMouseCaptured()
+{
+  // macOS sometimes drops the capture from leave() while the cursor is on a client
+  // (the hide and the mouse/cursor dissociation are reset, e.g. when another app
+  // comes to the front or the displays change). the local cursor then shows up and
+  // follows the mouse like a mirror of the client's. put the capture back.
+  CGEventRef posEvent = CGEventCreate(nullptr);
+  const CGPoint pos = CGEventGetLocation(posEvent);
+  CFRelease(posEvent);
+
+  const bool moved = fabs(pos.x - m_frozenCursor.x) >= 1 || fabs(pos.y - m_frozenCursor.y) >= 1;
+  const bool visible = CGCursorIsVisible();
+  if (!moved && !visible) {
+    return;
+  }
+
+  ++m_captureLostCount;
+  if (m_captureLostCount <= 3) {
+    LOG_INFO(
+        "mouse capture lost while on a client (cursor %s, at %.0f,%.0f, frozen at %.0f,%.0f), recapturing",
+        visible ? "visible" : "hidden", pos.x, pos.y, m_frozenCursor.x, m_frozenCursor.y
+    );
+  } else if (m_captureLostCount == 4) {
+    LOG_WARN("mouse capture keeps getting lost, recapturing without logging until the cursor comes back");
+  }
+
+  CGAssociateMouseAndMouseCursorPosition(false);
+  if (moved) {
+    CGWarpMouseCursorPosition(m_frozenCursor);
+  }
+
+  // cap the extra hides, so a cursor that never reports hidden can't pile up the count
+  if (visible && m_rehideCount < 32) {
+    CGDisplayHideCursor(m_displayID);
+    ++m_rehideCount;
+  }
 }
 
 void OSXComputer::enable()
@@ -796,6 +841,10 @@ void OSXComputer::enter()
     // re-couple the mouse to the cursor, undoing the capture from leave()
     CGAssociateMouseAndMouseCursorPosition(true);
     setZeroSuppressionInterval();
+
+    if (m_captureLostCount > 0) {
+      LOG_INFO("mouse capture was lost %d time(s) while on a client", m_captureLostCount);
+    }
   } else {
     // reset buttons
     m_buttonState.reset();
@@ -827,6 +876,11 @@ void OSXComputer::leave()
     // a client (onMouseMove reads raw deltas instead). must follow hideCursor(),
     // which re-associates. re-coupled in enter()/disable().
     CGAssociateMouseAndMouseCursorPosition(false);
+
+    CGEventRef posEvent = CGEventCreate(nullptr);
+    m_frozenCursor = CGEventGetLocation(posEvent);
+    CFRelease(posEvent);
+    m_captureLostCount = 0;
   }
 
   // now off computer
@@ -1012,6 +1066,8 @@ bool OSXComputer::onMouseMove(CGEventRef event)
   } else {
     // motion on secondary computer.  the cursor is frozen (see leave()), so read
     // raw deltas from the event instead of diffing position.
+    keepMouseCaptured();
+
     int32_t dx = (int32_t)CGEventGetIntegerValueField(event, kCGMouseEventDeltaX);
     int32_t dy = (int32_t)CGEventGetIntegerValueField(event, kCGMouseEventDeltaY);
 

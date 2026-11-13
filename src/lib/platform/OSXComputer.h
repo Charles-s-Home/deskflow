@@ -132,6 +132,9 @@ private:
   void showCursor();
   void hideCursor();
 
+  // while on a client, put the mouse capture from leave() back if macOS dropped it
+  void keepMouseCaptured();
+
   // map deskflow mouse button to mac buttons
   ButtonID mapDeskflowButtonToMac(uint16_t) const;
 
@@ -251,6 +254,11 @@ private:
   std::vector<MouseButtonEventMapType> MouseButtonEventMap;
 
   bool m_cursorHidden;
+
+  // where the cursor was frozen in leave(), and how often the capture was lost since
+  CGPoint m_frozenCursor = {0, 0};
+  int m_captureLostCount = 0;
+  int m_rehideCount = 0;
 
   // keyboard stuff
   OSXKeyState *m_keyState;
